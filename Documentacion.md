@@ -339,3 +339,186 @@ En la misma carpeta Entities, crea Plant.cs (representa las Plantas o Sucursales
    encargará de cargarla en tiempo de ejecución". Evita advertencias irrelevantes de C#.
 3. Factory Constructor (new Tenant(...) con validaciones):  
    • Garantiza que nunca se cree un Tenant en memoria que sea inválido (por ejemplo sin nombre o sin TaxId).
+
+## 🎯 PASO 2.3: Autenticación, Usuarios y Roles RBAC en GelatoERP.Domain
+
+En un ERP empresarial para heladerías, los permisos deben ser estrictos. Por ejemplo:
+
+• Un Jefe de Producción necesita ver/crear recetas, insumos y registrar pasteurización, pero no debería ver la facturación total o ganancias de  
+ la empresa.  
+ • Un Repartidor / Chofer necesita ver los pedidos del día y registrar la devolución de carapinas (envases), pero no puede modificar las fórmulas
+del helado.  
+ • Un SuperAdmin del SaaS (tú) puede administrar las empresas clientes.
+
+Para lograr esto implementaremos RBAC (Role-Based Access Control) con aislamiento por Tenant.  
+ ──────
+
+### 📄 Archivo 1: Crear Enums/UserRoleType.cs
+
+En la carpeta Domain/Enums, agrega este enumerador:
+
+    namespace GelatoERP.Domain.Enums;
+
+    public enum UserRoleType
+    {
+        SuperAdmin = 1,        // Administrador global de la plataforma SaaS (Tú)
+        TenantAdmin = 2,       // Dueño / Gerente General de la Heladería
+        ProductionManager = 3, // Jefe de Planta / Maestro Heladero / Pasteurizador
+        LogisticsManager = 4,  // Encargado de Despacho, Reparto y Carapinas
+        PointOfSaleUser = 5,   // Operario de Sucursal / Mostrador
+        QualityInspector = 6   // Técnico de Laboratorio / Control de Calidad
+    }
+    ──────
+
+### 📄 Archivo 2: Crear Entities/Role.cs
+
+En la carpeta Domain/Entities, agrega Role.cs:
+
+    using GelatoERP.Domain.Common;
+    using GelatoERP.Domain.Enums;
+
+    namespace GelatoERP.Domain.Entities;
+
+    /// <summary>
+    /// Representa un Rol dentro del sistema (RBAC).
+    /// </summary>
+    public class Role : BaseEntity
+    {
+        public string Name { get; private set; } = string.Empty;
+        public string Description { get; private set; } = string.Empty;
+        public UserRoleType RoleType { get; private set; }
+
+        private readonly List<UserRole> _userRoles = new();
+        public IReadOnlyCollection<UserRole> UserRoles => _userRoles.AsReadOnly();
+
+        private Role() { }
+
+        public Role(string name, string description, UserRoleType roleType)
+        {
+            Name = name.Trim();
+            Description = description.Trim();
+            RoleType = roleType;
+        }
+    }
+    ──────
+
+### 📄 Archivo 3: Crear Entities/User.cs
+
+En la carpeta Domain/Entities, agrega User.cs:
+
+    using GelatoERP.Domain.Common;
+
+    namespace GelatoERP.Domain.Entities;
+
+    /// <summary>
+    /// Representa a un Usuario del ERP.
+    /// Implementa ITenantEntity para forzar que pertenezca a una Heladería.
+    /// </summary>
+    public class User : BaseEntity, ITenantEntity
+    {
+        public Guid TenantId { get; set; }
+        public string FirstName { get; private set; } = string.Empty;
+        public string LastName { get; private set; } = string.Empty;
+        public string Email { get; private set; } = string.Empty;
+        public string PasswordHash { get; private set; } = string.Empty;
+        public bool IsActive { get; private set; } = true;
+
+        // Planta/Sucursal por defecto asignada al usuario (Opcional)
+        public Guid? AssignedPlantId { get; private set; }
+        public Plant? AssignedPlant { get; private set; }
+
+        // Propiedad de Navegación hacia la Heladería
+        public Tenant Tenant { get; private set; } = null!;
+
+        // Colección de Roles del Usuario
+        private readonly List<UserRole> _userRoles = new();
+        public IReadOnlyCollection<UserRole> UserRoles => _userRoles.AsReadOnly();
+
+        private User() { }
+
+        public User(Guid tenantId, string firstName, string lastName, string email, string passwordHash, Guid? assignedPlantId = null)
+        {
+            if (string.IsNullOrWhiteSpace(email))
+                throw new ArgumentException("El email es obligatorio.", nameof(email));
+
+            TenantId = tenantId;
+            FirstName = firstName.Trim();
+            LastName = lastName.Trim();
+            Email = email.Trim().ToLowerInvariant(); // Normalizamos siempre a minúsculas
+            PasswordHash = passwordHash;
+            AssignedPlantId = assignedPlantId;
+            IsActive = true;
+        }
+
+        public string FullName => $"{FirstName} {LastName}";
+
+        public void UpdateProfile(string firstName, string lastName, Guid? assignedPlantId)
+        {
+            FirstName = firstName.Trim();
+            LastName = lastName.Trim();
+            AssignedPlantId = assignedPlantId;
+            UpdateAuditInfo();
+        }
+
+        public void SetPasswordHash(string newPasswordHash)
+        {
+            if (string.IsNullOrWhiteSpace(newPasswordHash))
+                throw new ArgumentException("El hash de la contraseña no puede estar vacío.", nameof(newPasswordHash));
+
+            PasswordHash = newPasswordHash;
+            UpdateAuditInfo();
+        }
+
+        public void Deactivate()
+        {
+            IsActive = false;
+            UpdateAuditInfo();
+        }
+
+        public void Activate()
+        {
+            IsActive = true;
+            UpdateAuditInfo();
+        }
+    }
+    ──────
+
+### 📄 Archivo 4: Crear Entities/UserRole.cs
+
+En la carpeta Domain/Entities, crea la entidad intermedia de la relación Muchos-a-Muchos:
+
+    namespace GelatoERP.Domain.Entities;
+
+    /// <summary>
+    /// Tabla pivote Muchos-a-Muchos entre User y Role.
+    /// </summary>
+    public class UserRole
+    {
+        public Guid UserId { get; private set; }
+        public User User { get; private set; } = null!;
+
+        public Guid RoleId { get; private set; }
+        public Role Role { get; private set; } = null!;
+
+        private UserRole() { }
+
+        public UserRole(Guid userId, Guid roleId)
+        {
+            UserId = userId;
+            RoleId = roleId;
+        }
+    }
+    ──────
+
+### 🎓 Explicación Didáctica de Seguridad y C#
+
+1. PasswordHash vs Contraseña en texto plano:  
+   • En la entidad NUNCA se almacena la contraseña limpia (ej: "Helado123"). Solo se guarda el Hash cifrado (que generaremos en Infrastructure  
+   usando algoritmos seguros como BCrypt o Argon2).
+2. Email.ToLowerInvariant():  
+   • En C#, la comparación de strings depende del idioma y servidor si no se normaliza. Al registrar o buscar usuarios, siempre pasamos el email
+   a minúsculas invariantes para evitar que "Juan@heladeria.com" y "juan@heladeria.com" se traten como cuentas distintas.
+3. Guid? AssignedPlantId (Tipos Nullable):  
+   • El signo ? indica que la propiedad es opcional. Un Gerente General (TenantAdmin) puede no tener una planta fija porque administra todas las
+   sucursales, mientras que un pastelero de fábrica sí tendrá su AssignedPlantId apuntando a la planta de producción.  
+
