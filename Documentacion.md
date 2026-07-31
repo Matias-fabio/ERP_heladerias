@@ -1030,7 +1030,6 @@ Abrí la consola/terminal desde la raíz de tu proyecto (donde está el archivo 
 
     dotnet ef migrations add InitialCreate --project src/GelatoERP.Infrastructure --startup-project src/GelatoERP.Api
 
-
 │ 💡 Nota: Si la consola te dice que no reconoce dotnet ef, primero ejecutá este comando para instalar la herramienta  
  │ global de EF Core:  
  │ dotnet tool install --global dotnet-ef
@@ -1046,8 +1045,103 @@ Una vez creada la migración, ejecutá el comando para impactar los cambios en l
 
     dotnet ef database update --project src/GelatoERP.Infrastructure --startup-project src/GelatoERP.Api
 
-
 ¿Qué hace este comando?  
  Se conecta a Supabase usando la cadena de conexión configurada en tu appsettings.json y crea la estructura completa de la
 base de datos (Tenants, Plants, Users, Roles, UserRoles).  
  ──────
+
+### 🗺️ ¿Dónde estamos y qué sigue ahora?
+
+Hasta acá hemos completado con éxito la Fase 1, 2 y 3 (Dominio, Infraestructura, EF Core, Multi-Tenant Query Filters,  
+ Auditoría y Conexión en la Nube con Supabase).  
+ ──────
+
+### 🚀 FASE 4: Módulo de Gestión de Tenants (CQRS con MediatR)
+
+Ahora vamos a empezar a programar la lógica de negocio de la aplicación en la capa GelatoERP.Application implementando el
+patrón CQRS (Command Query Responsibility Segregation) con MediatR.
+
+El primer caso de uso será: Crear un nuevo Tenant (Heladería / Empresa).  
+ ──────
+
+### 🎯 PASO 4.1: Crear el DTO y el Comando CreateTenantCommand
+
+Para recibir los datos desde la API y crear un nuevo Tenant, crearemos la estructura CQRS para la entidad Tenant.
+
+#### 🏛️ Conceptos clave:
+
+1. Command (Comando): Es un objeto que representa una acción de escritura o modificación en el sistema (ej. Crear Tenant).
+2. Handler (Manejador): Es la clase encargada de procesar la orden: recibe el comando, valida la información, interactúa
+   con IApplicationDbContext y guarda en PostgreSQL.
+3. Response DTO: El objeto liviano que devolvemos como respuesta a quien llamó al comando.  
+   ──────
+
+#### 📄 Instrucciones:
+
+1. En el proyecto GelatoERP.Application, crea la siguiente estructura de carpetas:  
+   Tenants/Commands/CreateTenant
+2. Dentro de la carpeta CreateTenant, crea el archivo CreateTenantCommand.cs.
+3. Pega el siguiente código:  
+
+
+
+    using GelatoERP.Application.Common.Interfaces;
+    using GelatoERP.Domain.Entities;
+    using MediatR;
+
+    namespace GelatoERP.Application.Tenants.Commands.CreateTenant;
+
+    // 1. DTO de Respuesta
+    public record TenantDto(
+        Guid Id,
+        string Name,
+        string LegalName,
+        string TaxId,
+        string Plan,
+        bool IsActive,
+        DateTime CreatedAtUtc);
+
+    // 2. El Comando (Request de MediatR)
+    public record CreateTenantCommand(
+        string Name,
+        string LegalName,
+        string TaxId,
+        string? Plan) : IRequest<TenantDto>;
+
+    // 3. El Manejador (Handler)
+    public class CreateTenantCommandHandler : IRequestHandler<CreateTenantCommand, TenantDto>
+    {
+        private readonly IApplicationDbContext _context;
+
+        public CreateTenantCommandHandler(IApplicationDbContext context)
+        {
+        _context = context;
+    }
+
+        public async Task<TenantDto> Handle(CreateTenantCommand request, CancellationToken cancellationToken)
+    {
+        // Instanciar la entidad del Dominio
+            var tenant = new Tenant(
+                request.Name,
+    	request.LegalName,
+    	request.TaxId,
+    	request.Plan ?? "Standard");
+
+            // Agregar al DbContext
+            _context.Tenants.Add(tenant);
+
+            // Guardar cambios en la base de datos (Supabase)
+            await _context.SaveChangesAsync(cancellationToken);
+
+            // Retornar el DTO de respuesta
+            return new TenantDto(
+                tenant.Id,
+                tenant.Name,
+                tenant.LegalName,
+                tenant.TaxId,
+                tenant.Plan,
+                tenant.IsActive,
+                tenant.CreatedAtUtc);
+    }
+    }
+    ──────
