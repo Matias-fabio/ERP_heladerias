@@ -845,10 +845,8 @@ Para que el proyecto GelatoERP.Api pueda usar la base de datos y los servicios s
 
 #### 📄 Instrucción 1: Crear DependencyInjection.cs en GelatoERP.Application
 
-1. En la raíz del proyecto src/GelatoERP.Application, crea un archivo llamado DependencyInjection.cs.
-2. Pega el siguiente código:  
-
-
+1.  En la raíz del proyecto src/GelatoERP.Application, crea un archivo llamado DependencyInjection.cs.
+2.  Pega el siguiente código:
 
     using Microsoft.Extensions.DependencyInjection;
     using System.Reflection;
@@ -857,17 +855,17 @@ Para que el proyecto GelatoERP.Api pueda usar la base de datos y los servicios s
 
     public static class DependencyInjection
     {
-        public static IServiceCollection AddApplicationServices(this IServiceCollection services)
-        {
-            // Registrar MediatR para manejar Commands y Queries (CQRS)
-            services.AddMediatR(cfg => {
-                cfg.RegisterServicesFromAssembly(Assembly.GetExecutingAssembly());
-            });
+    public static IServiceCollection AddApplicationServices(this IServiceCollection services)
+    {
+    // Registrar MediatR para manejar Commands y Queries (CQRS)
+    services.AddMediatR(cfg => {
+    cfg.RegisterServicesFromAssembly(Assembly.GetExecutingAssembly());
+    });
 
             return services;
         }
-    }
 
+    }
 
 Explicación: Este extensión permite que con solo llamar a builder.Services.AddApplicationServices() en el Program.cs de  
  la API, se registren automáticamente todos los handlers de MediatR y validadores que vayamos agregando en la capa  
@@ -876,10 +874,8 @@ Explicación: Este extensión permite que con solo llamar a builder.Services.Add
 
 #### 📄 Instrucción 2: Crear DependencyInjection.cs en GelatoERP.Infrastructure
 
-1. En la raíz del proyecto src/GelatoERP.Infrastructure, crea un archivo llamado DependencyInjection.cs.
-2. Pega el siguiente código:  
-
-
+1.  En la raíz del proyecto src/GelatoERP.Infrastructure, crea un archivo llamado DependencyInjection.cs.
+2.  Pega el siguiente código:
 
     using GelatoERP.Application.Common.Interfaces;
     using GelatoERP.Infrastructure.Persistence;
@@ -892,13 +888,13 @@ Explicación: Este extensión permite que con solo llamar a builder.Services.Add
 
     public static class DependencyInjection
     {
-        public static IServiceCollection AddInfrastructureServices(
-            this IServiceCollection services,
-            IConfiguration configuration)
-        {
-            // 1. Registrar servicio para resolver el Tenant y Usuario de la petición actual
-            services.AddHttpContextAccessor();
-            services.AddScoped<ICurrentTenantService, CurrentTenantService>();
+    public static IServiceCollection AddInfrastructureServices(
+    this IServiceCollection services,
+    IConfiguration configuration)
+    {
+    // 1. Registrar servicio para resolver el Tenant y Usuario de la petición actual
+    services.AddHttpContextAccessor();
+    services.AddScoped<ICurrentTenantService, CurrentTenantService>();
 
             // 2. Registrar DbContext con PostgreSQL
             var connectionString = configuration.GetConnectionString("DefaultConnection");
@@ -914,7 +910,144 @@ FullName)));
         }
     }
 
-
 Explicación: Aquí registramos el servicio que identifica qué heladería/tenant está realizando el request  
  (CurrentTenantService) y configuramos la conexión a PostgreSQL a través de Entity Framework Core.  
+ ──────
+
+### 🎯 PASO 3.6: Configurar appsettings.json y Program.cs en la API
+
+Ahora vamos a conectar las capas en GelatoERP.Api registrando los servicios y definiendo la cadena de conexión a  
+ PostgreSQL. Además, configuraremos Swagger para que nos permita enviar el header X-Tenant-Id en cada prueba de endpoints.
+──────
+
+#### 📄 Instrucción 1: Actualizar appsettings.json
+
+1. Abrí el archivo src/GelatoERP.Api/appsettings.json.
+2. Reemplazá su contenido con la configuración de la cadena de conexión a PostgreSQL:
+
+   {
+   "ConnectionStrings": {
+   "DefaultConnection": "Host=localhost;Port=5432;Database=gelato_erp_db;Username=postgres;Password=postgres"
+   },
+   "Logging": {
+   "LogLevel": {
+   "Default": "Information",
+   "Microsoft.AspNetCore": "Warning"
+   }
+   },
+   "AllowedHosts": "\*"
+   }
+
+│ 💡 Nota: Si la contraseña o usuario de tu PostgreSQL local es diferente (por ejemplo, clave distinta de postgres),  
+ │ ajustala según tu entorno.  
+ ──────
+
+#### 📄 Instrucción 2: Actualizar Program.cs
+
+1.  Abrí el archivo src/GelatoERP.Api/Program.cs.
+2.  Reemplazá todo su contenido por el siguiente código:
+
+    using GelatoERP.Application;
+    using GelatoERP.Infrastructure;
+    using Microsoft.OpenApi.Models;
+
+    var builder = WebApplication.CreateBuilder(args);
+
+    // 1. Agregar servicios de las capas de Aplicación e Infraestructura
+    builder.Services.AddApplicationServices();
+    builder.Services.AddInfrastructureServices(builder.Configuration);
+
+    // 2. Agregar controladores
+    builder.Services.AddControllers();
+
+    // 3. Configurar Swagger/OpenAPI con soporte para el Header X-Tenant-Id
+    builder.Services.AddEndpointsApiExplorer();
+    builder.Services.AddSwaggerGen(options =>
+    {
+    options.SwaggerDoc("v1", new OpenApiInfo
+    {
+    Title = "GelatoERP API",
+    Version = "v1",
+    Description = "API del ERP Multi-Tenant para Heladerías y Fábricas de Helado"
+    });
+
+        // Agregar Header X-Tenant-Id a la interfaz visual de Swagger
+        options.AddSecurityDefinition("TenantId", new OpenApiSecurityScheme
+        {
+            Name = "X-Tenant-Id",
+            Type = SecuritySchemeType.ApiKey,
+            In = ParameterLocation.Header,
+            Description = "ID del Tenant (Guid) para la heladería/sucursal actual"
+        });
+
+        options.AddSecurityRequirement(new OpenApiSecurityRequirement
+        {
+            {
+                new OpenApiSecurityScheme
+                {
+                    Reference = new OpenApiReference
+                    {
+                        Type = ReferenceType.SecurityScheme,
+                        Id = "TenantId"
+                    }
+                },
+                Array.Empty<string>()
+            }
+        });
+
+    });
+
+    var app = builder.Build();
+
+    // 4. Configurar el pipeline HTTP
+    if (app.Environment.IsDevelopment())
+    {
+    app.UseSwagger();
+    app.UseSwaggerUI(c => c.SwaggerEndpoint("/swagger/v1/swagger.json", "GelatoERP API v1"));
+    }
+
+    app.UseHttpsRedirection();
+
+    app.UseAuthorization();
+
+    app.MapControllers();
+
+    app.Run();
+    ──────
+
+──────
+
+### 🎯 PASO 3.7: Crear y Aplicar las Migraciones en Supabase
+
+Entity Framework Core utiliza las Migraciones para transformar las entidades C# que definimos (Tenant, Plant, User, Role,
+UserRole) en tablas reales SQL dentro de PostgreSQL en Supabase.  
+ ──────
+
+#### 📄 Instrucción 1: Generar la migración InitialCreate
+
+Abrí la consola/terminal desde la raíz de tu proyecto (donde está el archivo GelatoErp.sln) y ejecutá el siguiente  
+ comando:
+
+    dotnet ef migrations add InitialCreate --project src/GelatoERP.Infrastructure --startup-project src/GelatoERP.Api
+
+
+│ 💡 Nota: Si la consola te dice que no reconoce dotnet ef, primero ejecutá este comando para instalar la herramienta  
+ │ global de EF Core:  
+ │ dotnet tool install --global dotnet-ef
+
+¿Qué hace este comando?  
+ Crea automáticamente la carpeta Migrations dentro del proyecto GelatoERP.Infrastructure con el código C# que define la  
+ estructura SQL inicial de tus tablas.  
+ ──────
+
+#### 📄 Instrucción 2: Aplicar la migración a la base de datos en Supabase
+
+Una vez creada la migración, ejecutá el comando para impactar los cambios en la nube:
+
+    dotnet ef database update --project src/GelatoERP.Infrastructure --startup-project src/GelatoERP.Api
+
+
+¿Qué hace este comando?  
+ Se conecta a Supabase usando la cadena de conexión configurada en tu appsettings.json y crea la estructura completa de la
+base de datos (Tenants, Plants, Users, Roles, UserRoles).  
  ──────
