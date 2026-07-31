@@ -520,5 +520,401 @@ En la carpeta Domain/Entities, crea la entidad intermedia de la relación Muchos
    a minúsculas invariantes para evitar que "Juan@heladeria.com" y "juan@heladeria.com" se traten como cuentas distintas.
 3. Guid? AssignedPlantId (Tipos Nullable):  
    • El signo ? indica que la propiedad es opcional. Un Gerente General (TenantAdmin) puede no tener una planta fija porque administra todas las
-   sucursales, mientras que un pastelero de fábrica sí tendrá su AssignedPlantId apuntando a la planta de producción.  
+   sucursales, mientras que un pastelero de fábrica sí tendrá su AssignedPlantId apuntando a la planta de producción.
 
+La instalación de paquetes NuGet (Npgsql.EntityFrameworkCore.PostgreSQL, EF Core Design, BCrypt, MediatR y FluentValidation) está completándose en segundo  
+ plano.
+
+Mientras termina, pasamos a diseñar el PASO 3 del Sprint 1: Infraestructura y Persistencia Multi-Tenant con EF Core y PostgreSQL.  
+ ──────
+
+## 🎯 PASO 3: Aislamiento por Tenant (ICurrentTenantService) y ApplicationDbContext
+
+En un ERP Multi-Empresa, el mayor riesgo es que un programador olvide escribir WHERE tenant_id = '...' en alguna consulta LINQ y se filtren datos de otra  
+ heladería.
+
+Para solucionar esto de raíz, implementaremos 2 mecanismos en C# / Entity Framework Core:
+
+1. ICurrentTenantService: Una interfaz en Application que extrae el TenantId del usuario que hace la solicitud HTTP (a partir de su Token JWT).
+2. Global Query Filters en EF Core: Un filtro automático en el DbContext que intercepta todas las consultas de la base de datos y le agrega WHERE "TenantId"
+   == currentTenantId sin que tú tengas que escribirlo manualmente en cada Query.  
+   ──────
+
+### 📄 Archivo 1: Interfaz en GelatoERP.Application/Common/Interfaces/ICurrentTenantService.cs
+
+Crea la carpeta Common/Interfaces dentro de GelatoERP.Application y agrega:
+
+    namespace GelatoERP.Application.Common.Interfaces;
+
+    /// <summary>
+    /// Proporciona la información del Tenant (Empresa) y Usuario actual en el contexto de la solicitud HTTP.
+    /// </summary>
+    public interface ICurrentTenantService
+    {
+        public Guid? TenantId { get; }
+        public string? UserId { get; }
+        public bool IsSuperAdmin { get; }
+    }
+    ──────
+
+### 📄 Archivo 2: Implementación en GelatoERP.Infrastructure/Services/CurrentTenantService.cs
+
+Crea la carpeta Services dentro de GelatoERP.Infrastructure y agrega:
+
+    using System.Security.Claims;
+    using GelatoERP.Application.Common.Interfaces;
+    using Microsoft.AspNetCore.Http;
+
+    namespace GelatoERP.Infrastructure.Services;
+
+    public class CurrentTenantService : ICurrentTenantService
+    {
+        public Guid? TenantId { get; }
+        public string? UserId { get; }
+        public bool IsSuperAdmin { get; }
+
+        public CurrentTenantService(IHttpContextAccessor httpContextAccessor)
+        {
+            var user = httpContextAccessor.HttpContext?.User;
+
+            if (user is null) return;
+
+            // Extraemos el UserId del Claim Types.NameIdentifier (o "sub")
+            UserId = user.FindFirstValue(ClaimTypes.NameIdentifier);
+
+            // Extraemos si es SuperAdmin de la plataforma
+            var role = user.FindFirstValue(ClaimTypes.Role);
+            IsSuperAdmin = role == "SuperAdmin";
+
+            // Extraemos el TenantId del Claim personalizado "tenant_id"
+            var tenantClaim = user.FindFirstValue("tenant_id");
+            if (Guid.TryParse(tenantClaim, out var tenantId))
+            {
+                TenantId = tenantId;
+            }
+        }
+    }
+    ──────
+
+### 📄 Archivo 3: Interfaz del DbContext en GelatoERP.Application/Common/Interfaces/IApplicationDbContext.cs
+
+En la carpeta GelatoERP.Application/Common/Interfaces, agrega esta interfaz (abstracción del DbContext para los Handlers CQRS):
+
+    using GelatoERP.Domain.Entities;
+    using Microsoft.EntityFrameworkCore;
+
+    namespace GelatoERP.Application.Common.Interfaces;
+
+    public interface IApplicationDbContext
+    {
+        DbSet<Tenant> Tenants { get; }
+        DbSet<Plant> Plants { get; }
+        DbSet<User> Users { get; }
+        DbSet<Role> Roles { get; }
+        DbSet<UserRole> UserRoles { get; }
+
+        Task<int> SaveChangesAsync(CancellationToken cancellationToken = default);
+    }
+    ──────
+
+### 🎓 Explicación Didáctica
+
+1. IHttpContextAccessor: Es la herramienta de ASP.NET Core que nos permite leer los encabezados, la sesión o los Claims del Token JWT del cliente en cualquier capa del sistema sin acoplar la base de datos a la Web API.
+2. IApplicationDbContext: Siguiendo el principio de Inversión de Dependencias (DIP), los comandos y consultas MediatR en Application usarán la interfaz IApplicationDbContext.
+
+──────
+
+### 📄 Archivo 4: Clase Concreta DbContext en GelatoERP.Infrastructure/Persistence/ApplicationDbContext.cs
+
+Crea la carpeta Persistence dentro de GelatoERP.Infrastructure y agrega ApplicationDbContext.cs:
+
+    using GelatoERP.Application.Common.Interfaces;
+    using GelatoERP.Domain.Common;
+    using GelatoERP.Domain.Entities;
+    using Microsoft.EntityFrameworkCore;
+
+    namespace GelatoERP.Infrastructure.Persistence;
+
+    public class ApplicationDbContext : DbContext, IApplicationDbContext
+    {
+        private readonly ICurrentTenantService _currentTenantService;
+
+        public ApplicationDbContext(
+            DbContextOptions<ApplicationDbContext> options,
+            ICurrentTenantService currentTenantService)
+            : base(options)
+        {
+            _currentTenantService = currentTenantService;
+        }
+
+        public DbSet<Tenant> Tenants => Set<Tenant>();
+        public DbSet<Plant> Plants => Set<Plant>();
+        public DbSet<User> Users => Set<User>();
+        public DbSet<Role> Roles => Set<Role>();
+        public DbSet<UserRole> UserRoles => Set<UserRole>();
+
+        protected override void OnModelCreating(ModelBuilder modelBuilder)
+        {
+            base.OnModelCreating(modelBuilder);
+
+            // Configurar relación Muchos-a-Muchos UserRole (Clave primaria compuesta)
+            modelBuilder.Entity<UserRole>()
+                .HasKey(ur => new { ur.UserId, ur.RoleId });
+
+            // Global Query Filters (Aislamiento por Tenant y Soft Delete)
+            foreach (var entityType in modelBuilder.Model.GetEntityTypes())
+            {
+                // 1. Soft Delete Filter (IsDeleted == false)
+                if (typeof(BaseEntity).IsAssignableFrom(entityType.ClrType))
+                {
+                    var parameter = System.Linq.Expressions.Expression.Parameter(entityType.ClrType, "e");
+                    var body = System.Linq.Expressions.Expression.Equal(
+                        System.Linq.Expressions.Expression.Property(parameter, nameof(BaseEntity.IsDeleted)),
+                        System.Linq.Expressions.Expression.Constant(false));
+
+                    var lambda = System.Linq.Expressions.Expression.Lambda(body, parameter);
+                    modelBuilder.Entity(entityType.ClrType).HasQueryFilter(lambda);
+                }
+
+                // 2. Multi-Tenant Filter (TenantId == currentTenantId)
+                if (typeof(ITenantEntity).IsAssignableFrom(entityType.ClrType))
+                {
+                    var parameter = System.Linq.Expressions.Expression.Parameter(entityType.ClrType, "e");
+                    var tenantIdProperty = System.Linq.Expressions.Expression.Property(parameter, nameof(ITenantEntity.TenantId));
+                    var currentTenantIdValue = System.Linq.Expressions.Expression.Property(
+                        System.Linq.Expressions.Expression.Constant(_currentTenantService),
+                        nameof(ICurrentTenantService.TenantId));
+
+                    // tenantId == _currentTenantService.TenantId
+                    var body = System.Linq.Expressions.Expression.Equal(
+                        tenantIdProperty,
+                        System.Linq.Expressions.Expression.Convert(currentTenantIdValue, typeof(Guid)));
+
+                    var lambda = System.Linq.Expressions.Expression.Lambda(body, parameter);
+                    modelBuilder.Entity(entityType.ClrType).HasQueryFilter(lambda);
+                }
+            }
+        }
+
+        public override async Task<int> SaveChangesAsync(CancellationToken cancellationToken = default)
+        {
+            foreach (var entry in ChangeTracker.Entries<BaseEntity>())
+            {
+                switch (entry.State)
+                {
+                    case EntityState.Added:
+                        // La fecha de creación la setea la propia entidad (UtcNow), registramos auditoría
+                        entry.Property(e => e.CreatedBy).CurrentValue = _currentTenantService.UserId;
+                        break;
+
+                    case EntityState.Modified:
+                        entry.Entity.UpdateAuditInfo(_currentTenantService.UserId);
+                        break;
+                }
+            }
+
+            return await base.SaveChangesAsync(cancellationToken);
+        }
+    }
+
+────── 2. IApplicationDbContext: Siguiendo el principio de Inversión de Dependencias (DIP) que repasamos antes, los comandos y consultas MediatR en Application  
+ usarán la interfaz IApplicationDbContext para hacer \_context.Tenants.Add(...) o \_context.Users.ToListAsync(...). No dependerán directamente de la clase  
+ concreta GelatoDbContext de la capa Infrastructure.
+
+### 🎯 PASO 3.4: Construir la Persistencia con ApplicationDbContext
+
+Ahora vamos a implementar el corazón del acceso a datos y aislamiento Multi-Tenant en Entity Framework Core.
+
+#### 🏛️ Conceptos clave que tenés que entender de este paso:
+
+1. Global Query Filters (Filtros Globales Automáticos):  
+   • En lugar de obligar al programador a escribir .Where(x => x.TenantId == tenantId && !x.IsDeleted) en cada consulta
+   LINQ del sistema, usamos Expresiones Lambda de C# en el OnModelCreating.  
+   • EF Core interceptará todas las consultas enviadas a PostgreSQL y agregará automáticamente estas condiciones. Si  
+   entra un usuario de la Heladería Lucciano's, solo verá datos con su TenantId.
+2. Auditoría Automática en SaveChangesAsync:  
+   • Sobreescribimos el método SaveChangesAsync.  
+   • Antes de enviar los datos a PostgreSQL, inspeccionamos ChangeTracker.Entries<BaseEntity>().  
+   • Si la entidad es nueva (Added), le asignamos CreatedBy con el UserId del usuario actual.  
+   • Si la entidad se está editando (Modified), llamamos a UpdateAuditInfo(\_currentTenantService.UserId) para actualizar
+   LastModifiedAtUtc y LastModifiedBy.
+
+──────
+
+### 📄 Instrucciones: Crear el archivo ApplicationDbContext.cs
+
+1.  En el proyecto GelatoERP.Infrastructure, crea una carpeta llamada Persistence.
+2.  Dentro de Persistence, crea el archivo ApplicationDbContext.cs.
+3.  Pega el siguiente código:
+
+    using GelatoERP.Application.Common.Interfaces;
+    using GelatoERP.Domain.Common;
+    using GelatoERP.Domain.Entities;
+    using Microsoft.EntityFrameworkCore;
+
+    namespace GelatoERP.Infrastructure.Persistence;
+
+    public class ApplicationDbContext : DbContext, IApplicationDbContext
+    {
+    private readonly ICurrentTenantService \_currentTenantService;
+
+        public ApplicationDbContext(
+            DbContextOptions<ApplicationDbContext> options,
+            ICurrentTenantService currentTenantService)
+            : base(options)
+        {
+            _currentTenantService = currentTenantService;
+        }
+
+        public DbSet<Tenant> Tenants => Set<Tenant>();
+        public DbSet<Plant> Plants => Set<Plant>();
+        public DbSet<User> Users => Set<User>();
+        public DbSet<Role> Roles => Set<Role>();
+        public DbSet<UserRole> UserRoles => Set<UserRole>();
+
+        protected override void OnModelCreating(ModelBuilder modelBuilder)
+        {
+            base.OnModelCreating(modelBuilder);
+
+            // 1. Configurar clave primaria compuesta para la tabla intermedia UserRole
+            modelBuilder.Entity<UserRole>()
+                .HasKey(ur => new { ur.UserId, ur.RoleId });
+
+            // 2. Aplicar Global Query Filters a las entidades
+            foreach (var entityType in modelBuilder.Model.GetEntityTypes())
+            {
+                // Soft Delete Filter: Oculta registros marcados como IsDeleted = true
+                if (typeof(BaseEntity).IsAssignableFrom(entityType.ClrType))
+                {
+                    var parameter = System.Linq.Expressions.Expression.Parameter(entityType.ClrType, "e");
+                    var body = System.Linq.Expressions.Expression.Equal(
+                        System.Linq.Expressions.Expression.Property(parameter, nameof(BaseEntity.IsDeleted)),
+                        System.Linq.Expressions.Expression.Constant(false));
+
+                    var lambda = System.Linq.Expressions.Expression.Lambda(body, parameter);
+                    modelBuilder.Entity(entityType.ClrType).HasQueryFilter(lambda);
+                }
+
+                // Multi-Tenant Filter: Filtra automáticamente por TenantId
+                if (typeof(ITenantEntity).IsAssignableFrom(entityType.ClrType))
+                {
+                    var parameter = System.Linq.Expressions.Expression.Parameter(entityType.ClrType, "e");
+
+                    var tenantIdProperty = System.Linq.Expressions.Expression.Property(parameter, nameof(ITenantEntity.TenantId));
+
+                    var currentTenantIdValue = System.Linq.Expressions.Expression.Property(
+                    System.Linq.Expressions.Expression.Constant(\_currentTenantService),nameof(ICurrentTenantService.TenantId));
+
+                    var body = System.Linq.Expressions.Expression.Equal(
+                        tenantIdProperty,
+                        System.Linq.Expressions.Expression.Convert(currentTenantIdValue, typeof(Guid)));
+
+                    var lambda = System.Linq.Expressions.Expression.Lambda(body, parameter);
+                    modelBuilder.Entity(entityType.ClrType).HasQueryFilter(lambda);
+                }
+            }
+        }
+
+        public override async Task<int> SaveChangesAsync(CancellationToken cancellationToken = default)
+        {
+            foreach (var entry in ChangeTracker.Entries<BaseEntity>())
+            {
+                switch (entry.State)
+                {
+                    case EntityState.Added:
+                        entry.Property(e => e.CreatedBy).CurrentValue = _currentTenantService.UserId;
+                        break;
+
+                    case EntityState.Modified:
+                        entry.Entity.UpdateAuditInfo(_currentTenantService.UserId);
+                        break;
+                }
+            }
+
+            return await base.SaveChangesAsync(cancellationToken);
+        }
+
+    }
+    ──────
+
+### 🎯 Próximo Paso: Paso 3.5 — Configurar la Inyección de Dependencias (DI)
+
+Para que el proyecto GelatoERP.Api pueda usar la base de datos y los servicios sin acoplarse directamente a las  
+ implementaciones concretas, debemos registrar las dependencias en cada capa.  
+ ──────
+
+#### 📄 Instrucción 1: Crear DependencyInjection.cs en GelatoERP.Application
+
+1. En la raíz del proyecto src/GelatoERP.Application, crea un archivo llamado DependencyInjection.cs.
+2. Pega el siguiente código:  
+
+
+
+    using Microsoft.Extensions.DependencyInjection;
+    using System.Reflection;
+
+    namespace GelatoERP.Application;
+
+    public static class DependencyInjection
+    {
+        public static IServiceCollection AddApplicationServices(this IServiceCollection services)
+        {
+            // Registrar MediatR para manejar Commands y Queries (CQRS)
+            services.AddMediatR(cfg => {
+                cfg.RegisterServicesFromAssembly(Assembly.GetExecutingAssembly());
+            });
+
+            return services;
+        }
+    }
+
+
+Explicación: Este extensión permite que con solo llamar a builder.Services.AddApplicationServices() en el Program.cs de  
+ la API, se registren automáticamente todos los handlers de MediatR y validadores que vayamos agregando en la capa  
+ Application.  
+ ──────
+
+#### 📄 Instrucción 2: Crear DependencyInjection.cs en GelatoERP.Infrastructure
+
+1. En la raíz del proyecto src/GelatoERP.Infrastructure, crea un archivo llamado DependencyInjection.cs.
+2. Pega el siguiente código:  
+
+
+
+    using GelatoERP.Application.Common.Interfaces;
+    using GelatoERP.Infrastructure.Persistence;
+    using GelatoERP.Infrastructure.Services;
+    using Microsoft.EntityFrameworkCore;
+    using Microsoft.Extensions.Configuration;
+    using Microsoft.Extensions.DependencyInjection;
+
+    namespace GelatoERP.Infrastructure;
+
+    public static class DependencyInjection
+    {
+        public static IServiceCollection AddInfrastructureServices(
+            this IServiceCollection services,
+            IConfiguration configuration)
+        {
+            // 1. Registrar servicio para resolver el Tenant y Usuario de la petición actual
+            services.AddHttpContextAccessor();
+            services.AddScoped<ICurrentTenantService, CurrentTenantService>();
+
+            // 2. Registrar DbContext con PostgreSQL
+            var connectionString = configuration.GetConnectionString("DefaultConnection");
+            services.AddDbContext<ApplicationDbContext>(options =>
+                options.UseNpgsql(connectionString, b => b.MigrationsAssembly(typeof(ApplicationDbContext).Assembly.
+
+FullName)));
+
+            // 3. Registrar IApplicationDbContext para la Inversión de Dependencias
+            services.AddScoped<IApplicationDbContext>(provider => provider.GetRequiredService<ApplicationDbContext>());
+
+            return services;
+        }
+    }
+
+
+Explicación: Aquí registramos el servicio que identifica qué heladería/tenant está realizando el request  
+ (CurrentTenantService) y configuramos la conexión a PostgreSQL a través de Entity Framework Core.  
+ ──────
