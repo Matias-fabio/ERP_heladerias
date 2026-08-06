@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using System.Threading.Tasks;
+using FluentValidation;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace GelatoERP.Application
@@ -15,6 +16,9 @@ namespace GelatoERP.Application
             services.AddMediatR(cfg => {                                                                                   
                 cfg.RegisterServicesFromAssembly(Assembly.GetExecutingAssembly());                                         
             });
+
+            // 2. Registrar automáticamente todos los validadores de FluentValidation del ensamblado                       
+            services.AddValidatorsFromAssembly(Assembly.GetExecutingAssembly());  
             return services;
         }
     }

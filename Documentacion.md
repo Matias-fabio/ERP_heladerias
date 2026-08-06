@@ -1078,12 +1078,10 @@ Para recibir los datos desde la API y crear un nuevo Tenant, crearemos la estruc
 
 #### 📄 Instrucciones:
 
-1. En el proyecto GelatoERP.Application, crea la siguiente estructura de carpetas:  
-   Tenants/Commands/CreateTenant
-2. Dentro de la carpeta CreateTenant, crea el archivo CreateTenantCommand.cs.
-3. Pega el siguiente código:  
-
-
+1.  En el proyecto GelatoERP.Application, crea la siguiente estructura de carpetas:  
+    Tenants/Commands/CreateTenant
+2.  Dentro de la carpeta CreateTenant, crea el archivo CreateTenantCommand.cs.
+3.  Pega el siguiente código:
 
     using GelatoERP.Application.Common.Interfaces;
     using GelatoERP.Domain.Entities;
@@ -1093,39 +1091,41 @@ Para recibir los datos desde la API y crear un nuevo Tenant, crearemos la estruc
 
     // 1. DTO de Respuesta
     public record TenantDto(
-        Guid Id,
-        string Name,
-        string LegalName,
-        string TaxId,
-        string Plan,
-        bool IsActive,
-        DateTime CreatedAtUtc);
+    Guid Id,
+    string Name,
+    string LegalName,
+    string TaxId,
+    string Plan,
+    bool IsActive,
+    DateTime CreatedAtUtc);
 
     // 2. El Comando (Request de MediatR)
     public record CreateTenantCommand(
-        string Name,
-        string LegalName,
-        string TaxId,
-        string? Plan) : IRequest<TenantDto>;
+    string Name,
+    string LegalName,
+    string TaxId,
+    string? Plan) : IRequest<TenantDto>;
 
     // 3. El Manejador (Handler)
     public class CreateTenantCommandHandler : IRequestHandler<CreateTenantCommand, TenantDto>
     {
-        private readonly IApplicationDbContext _context;
+    private readonly IApplicationDbContext \_context;
 
         public CreateTenantCommandHandler(IApplicationDbContext context)
         {
         _context = context;
+
     }
 
         public async Task<TenantDto> Handle(CreateTenantCommand request, CancellationToken cancellationToken)
+
     {
-        // Instanciar la entidad del Dominio
-            var tenant = new Tenant(
-                request.Name,
-    	request.LegalName,
-    	request.TaxId,
-    	request.Plan ?? "Standard");
+    // Instanciar la entidad del Dominio
+    var tenant = new Tenant(
+    request.Name,
+    request.LegalName,
+    request.TaxId,
+    request.Plan ?? "Standard");
 
             // Agregar al DbContext
             _context.Tenants.Add(tenant);
@@ -1142,6 +1142,198 @@ Para recibir los datos desde la API y crear un nuevo Tenant, crearemos la estruc
                 tenant.Plan,
                 tenant.IsActive,
                 tenant.CreatedAtUtc);
+        }
+
     }
+
+──────
+
+### 📌 ESTADO Y RESUMEN PARA REINICIO DE SESIÓN
+
+**Fases Completadas:**
+
+- ✅ **Fase 1 (Dominio):** Entidades `Tenant`, `Plant`, `User`, `Role`, `UserRole` y clases base `BaseEntity`, `ITenantEntity`.
+- ✅ **Fase 2 (Aplicación):** Interfaces `IApplicationDbContext`, `ICurrentTenantService`, configuración de MediatR y FluentValidation.
+- ✅ **Fase 3 (Infraestructura y Nube):** `ApplicationDbContext` con Global Query Filters (Soft Delete y Multi-Tenant), auditoría automática, `CurrentTenantService`, y conexión a **Supabase PostgreSQL** mediante `appsettings.Development.json` (protegido en `.gitignore`).
+- ✅ **Migración EF Core:** Se generó la migración `InitialCreate` y se ejecutó exitosamente la actualización de la base de datos en Supabase (`dotnet ef database update`).
+
+**Paso en el que nos quedamos (Paso 4.1):**
+
+- **Acción pendiente del usuario:** Crear el archivo `CreateTenantCommand.cs` en la ruta `src/GelatoERP.Application/Tenants/Commands/CreateTenant/CreateTenantCommand.cs` con el código del comando y handler de MediatR.
+- **Próximo paso a realizar:** Crear el validador `CreateTenantCommandValidator.cs` con FluentValidation y el controlador `TenantsController.cs` en la API.
+
+  ──────
+
+  ### 🚀 PASO 4.2: Crear el Validador CreateTenantCommandValidator.cs con FluentValidation
+
+  Para garantizar la integridad de los datos antes de ejecutar la lógica de negocio en el handler, implementamos  
+  validaciones defensivas usando FluentValidation.
+
+  #### 💡 ¿Qué reglas vamos a aplicar?
+  1. Name: Requerido, no vacío, máximo 100 caracteres.
+  2. TaxId: Requerido, no vacío (ej: CUIT/RUT/RFC), máximo 20 caracteres.
+  3. DomainOrSlug: Requerido, no vacío, máximo 50 caracteres y solo debe permitir letras minúsculas, números y guiones  
+     medios (ej: heladeria-don-luis).  
+     ──────
+
+  ### 📋 Instrucciones paso a paso:
+
+  #### 1️⃣ Crear el archivo del Validador
+
+  Dentro de la carpeta src/GelatoERP.Application/Tenants/Commands/CreateTenant/, crea el archivo:  
+  📄 CreateTenantCommandValidator.cs
+
+  #### 2️⃣ Pegar el siguiente código en CreateTenantCommandValidator.cs
+
+  using FluentValidation;
+
+  namespace GelatoERP.Application.Tenants.Commands.CreateTenant;
+
+  /// <summary>  
+   /// Reglas de validación para CreateTenantCommand utilizando FluentValidation.  
+   /// </summary>  
+   public class CreateTenantCommandValidator : AbstractValidator<CreateTenantCommand>  
+   {  
+   public CreateTenantCommandValidator()  
+   {  
+   RuleFor(v => v.Name)  
+   .NotEmpty().WithMessage("El nombre de la heladería/empresa es obligatorio.")  
+   .MaximumLength(100).WithMessage("El nombre no debe superar los 100 caracteres.");
+
+            RuleFor(v => v.TaxId)
+                .NotEmpty().WithMessage("El identificador fiscal (CUIT/RUT) es obligatorio.")
+                .MaximumLength(20).WithMessage("El identificador fiscal no debe superar los 20 caracteres.");
+
+            RuleFor(v => v.DomainOrSlug)
+                .NotEmpty().WithMessage("El subdominio o slug es obligatorio.")
+                .MaximumLength(50).WithMessage("El subdominio o slug no debe superar los 50 caracteres.")
+                .Matches("^[a-z0-9-]+$").WithMessage("El subdominio solo puede contener letras minúsculas, números y
+
+  guiones medios (ej: heladeria-don-luis).");  
+   }  
+   }  
+   ──────
+
+  #### 3 Registrar FluentValidation en DependencyInjection.cs
+
+  Para que los validadores se registren automáticamente en el contenedor de dependencias de la aplicación, debemos  
+  actualizar DependencyInjection.cs.
+
+  Abre src/GelatoERP.Application/DependencyInjection.cs y actualízalo para que quede así:
+
+  using System.Reflection;  
+   using FluentValidation;  
+   using Microsoft.Extensions.DependencyInjection;
+
+  namespace GelatoERP.Application;
+
+  public static class DependencyInjection  
+   {  
+   public static IServiceCollection AddApplicationServices(this IServiceCollection services)  
+   {  
+   // 1. Registrar MediatR para manejar Commands y Queries (CQRS)  
+   services.AddMediatR(cfg => {  
+   cfg.RegisterServicesFromAssembly(Assembly.GetExecutingAssembly());  
+   });
+
+            // 2. Registrar automáticamente todos los validadores de FluentValidation del ensamblado
+            services.AddValidatorsFromAssembly(Assembly.GetExecutingAssembly());
+
+            return services;
+        }
+
+  }  
+   ──────
+
+### 🚀 PASO 4.3: Crear los Controladores en la API (ApiControllerBase y TenantsController)
+
+Ahora vamos a exponer nuestro primer endpoint HTTP (POST /api/tenants) en la capa GelatoERP.Api.
+
+Para mantener el código limpio y reusable, crearemos primero un controlador base (ApiControllerBase) que nos resolverá  
+ automáticamente la instancia de ISender (MediatR) para todos los futuros controladores.  
+ ──────
+
+### 📋 Instrucciones paso a paso:
+
+#### 1️⃣ Crear la carpeta Controllers
+
+En la raíz del proyecto src/GelatoERP.Api, crea la carpeta:  
+ 📁 Controllers
+
+Ruta completa: src/GelatoERP.Api/Controllers/  
+ ──────
+
+#### 2️⃣ Crear el controlador base ApiControllerBase.cs
+
+Dentro de src/GelatoERP.Api/Controllers/, crea el archivo:  
+ 📄 ApiControllerBase.cs
+
+Pega el siguiente código:
+
+    using MediatR;
+    using Microsoft.AspNetCore.Mvc;
+
+    namespace GelatoERP.Api.Controllers;
+
+    [ApiController]
+    [Route("api/[controller]")]
+    public abstract class ApiControllerBase : ControllerBase
+    {
+        private ISender? _mediator;
+
+        /// <summary>
+        /// Propiedad protegida que resuelve el bus de MediatR mediante Inyección de Dependencias.
+        /// </summary>
+        protected ISender Mediator => _mediator ??= HttpContext.RequestServices.GetRequiredService<ISender>();
     }
     ──────
+
+#### 3️⃣ Crear el controlador TenantsController.cs
+
+Dentro de src/GelatoERP.Api/Controllers/, crea el archivo:  
+ 📄 TenantsController.cs
+
+Pega el siguiente código:
+
+    using GelatoERP.Application.Tenants.Commands.CreateTenant;
+    using Microsoft.AspNetCore.Mvc;
+
+    namespace GelatoERP.Api.Controllers;
+
+    public class TenantsController : ApiControllerBase
+    {
+        /// <summary>
+        /// Registrar un nuevo Tenant (Heladería / Empresa) en la plataforma ERP.
+        /// </summary>
+        /// <param name="command">Datos del Tenant a crear</param>
+        /// <returns>Tenant creado con su ID generado</returns>
+        [HttpPost]
+        [ProducesResponseType(typeof(TenantDto), StatusCodes.Status201Created)]
+        [ProducesResponseType(StatusCodes.Status400BadRequest)]
+        public async Task<ActionResult<TenantDto>> Create(CreateTenantCommand command)
+        {
+            var result = await Mediator.Send(command);
+            return CreatedAtAction(nameof(Create), new { id = result.Id }, result);
+        }
+    }
+    ──────
+
+### 📌 ESTADO Y RESUMEN DE AVANCE DEL PROYECTO
+
+**Fases Completadas:**
+
+- ✅ **Fase 1 (Dominio):** Entidades `Tenant`, `Plant`, `User`, `Role`, `UserRole` y clases base `BaseEntity`, `ITenantEntity`.
+- ✅ **Fase 2 (Aplicación):** Interfaces `IApplicationDbContext`, `ICurrentTenantService`, configuración de MediatR y FluentValidation.
+- ✅ **Fase 3 (Infraestructura y Nube):** `ApplicationDbContext` con Global Query Filters (Soft Delete y Multi-Tenant), auditoría automática, `CurrentTenantService`, y conexión a **Supabase PostgreSQL** mediante `appsettings.Development.json`.
+- ✅ **Migración EF Core:** Migración `InitialCreate` ejecutada exitosamente en la base de datos de Supabase (`dotnet ef database update`).
+- ✅ **Fase 4 (Módulo Tenants - Creación):**
+  - Comando y Handler MediatR: `CreateTenantCommand.cs`
+  - Validador FluentValidation: `CreateTenantCommandValidator.cs`
+  - Controladores API: `ApiControllerBase.cs` y `TenantsController.cs` (`POST /api/tenants` probado y respondiendo `201 Created`).
+
+**Próximas Fases a Desarrollar:**
+- 🟢 **Fase 5 (Consultas / Queries y Middlewares):**
+  - Implementar Pipeline Behavior para la ejecución automática de validaciones FluentValidation en MediatR.
+  - Implementar `GetTenantsQuery` (`GET /api/tenants`) y `GetTenantByIdQuery` (`GET /api/tenants/{id}`).
+  - Middleware global de excepciones.
+
