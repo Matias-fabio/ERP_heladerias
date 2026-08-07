@@ -1332,8 +1332,307 @@ Pega el siguiente código:
   - Controladores API: `ApiControllerBase.cs` y `TenantsController.cs` (`POST /api/tenants` probado y respondiendo `201 Created`).
 
 **Próximas Fases a Desarrollar:**
+
 - 🟢 **Fase 5 (Consultas / Queries y Middlewares):**
   - Implementar Pipeline Behavior para la ejecución automática de validaciones FluentValidation en MediatR.
   - Implementar `GetTenantsQuery` (`GET /api/tenants`) y `GetTenantByIdQuery` (`GET /api/tenants/{id}`).
   - Middleware global de excepciones.
+
+el PASO 5.1: Crear e Integrar ValidationBehavior.cs en MediatR.  
+ ──────
+
+### 💡 ¿Qué hace el ValidationBehavior?
+
+Es un interceptor en el pipeline de MediatR. Cada vez que enviamos cualquier comando (Mediator.Send(...)):
+
+1. Revisa si hay un validador registrado para ese comando (como CreateTenantCommandValidator).
+2. Ejecuta las reglas de FluentValidation.
+3. Si los datos son válidos ➔ Continúa hacia el Handler.
+4. Si los datos son inválidos ➔ Lanza una ValidationException antes de tocar la base de datos.  
+   ──────
+
+### 📋 Instrucciones paso a paso:
+
+#### 1️⃣ Crear la carpeta Behaviors
+
+Dentro de src/GelatoERP.Application/Common/, crea la carpeta:  
+ 📁 Behaviors
+
+Ruta completa: src/GelatoERP.Application/Common/Behaviors/  
+ ──────
+
+#### 2️⃣ Crear el archivo ValidationBehavior.cs
+
+Dentro de src/GelatoERP.Application/Common/Behaviors/, crea el archivo:  
+ 📄 ValidationBehavior.cs
+
+Pega el siguiente código:
+
+    using FluentValidation;
+    using MediatR;
+
+    namespace GelatoERP.Application.Common.Behaviors;
+
+    /// <summary>
+    /// Pipeline Behavior de MediatR para interceptar cada Command/Query y ejecutar sus validaciones de FluentValidation
+
+automáticamente.  
+ /// </summary>  
+ public class ValidationBehavior<TRequest, TResponse> : IPipelineBehavior<TRequest, TResponse>  
+ where TRequest : notnull  
+ {  
+ private readonly IEnumerable<IValidator<TRequest>> \_validators;
+
+        public ValidationBehavior(IEnumerable<IValidator<TRequest>> validators)
+        {
+            _validators = validators;
+        }
+
+        public async Task<TResponse> Handle(
+            TRequest request,
+            RequestHandlerDelegate<TResponse> next,
+            CancellationToken cancellationToken)
+        {
+            if (_validators.Any())
+            {
+                var context = new ValidationContext<TRequest>(request);
+
+                var validationResults = await Task.WhenAll(
+                    _validators.Select(v => v.ValidateAsync(context, cancellationToken)));
+
+                var failures = validationResults
+                    .Where(r => r.Errors.Any())
+                    .SelectMany(r => r.Errors)
+                    .ToList();
+
+                if (failures.Count != 0)
+                {
+                    throw new ValidationException(failures);
+                }
+            }
+
+            return await next();
+        }
+    }
+    ──────
+
+#### 3 Actualizar DependencyInjection.cs
+
+Abre DependencyInjection.cs en src/GelatoERP.Application/ y reemplaza su contenido por este:
+
+    using System.Reflection;
+    using FluentValidation;
+    using GelatoERP.Application.Common.Behaviors;
+    using MediatR;
+    using Microsoft.Extensions.DependencyInjection;
+
+    namespace GelatoERP.Application;
+
+    public static class DependencyInjection
+    {
+        public static IServiceCollection AddApplicationServices(this IServiceCollection services)
+        {
+            // 1. Registrar MediatR y el Pipeline Behavior de Validación
+            services.AddMediatR(cfg => {
+                cfg.RegisterServicesFromAssembly(Assembly.GetExecutingAssembly());
+                cfg.AddBehavior(typeof(IPipelineBehavior<,>), typeof(ValidationBehavior<,>));
+            });
+
+            // 2. Registrar automáticamente todos los validadores de FluentValidation
+            services.AddValidatorsFromAssembly(Assembly.GetExecutingAssembly());
+
+            return services;
+        }
+    }
+    ──────
+
+### 🚀 PASO 5.2: Implementar Consultas (Queries) de Tenants (GET /api/tenants)
+
+En CQRS separaremos la lectura de la escritura. Para las consultas usaremos la cláusula .AsNoTracking() de EF Core para  
+ optimizar el rendimiento y evitar sobrecarga en la memoria.
+
+Crearemos dos consultas:
+
+1. GetTenantsQuery: Obtiene el listado completo de heladerías/tenants.
+2. GetTenantByIdQuery: Obtiene el detalle de un tenant específico pasando su Guid.  
+   ──────
+
+### 📋 Instrucciones paso a paso:
+
+#### 1️⃣ Crear la estructura de carpetas
+
+Dentro de src/GelatoERP.Application/Tenants/, crea la carpeta Queries y dentro sus subcarpetas:
+
+    Tenants/
+      └── Queries/
+          ├── GetTenants/
+          └── GetTenantById/
+    ──────
+
+#### 2️⃣ Crear el archivo GetTenantsQuery.cs
+
+Ruta: src/GelatoERP.Application/Tenants/Queries/GetTenants/GetTenantsQuery.cs
+
+Pega el siguiente código:
+
+    using GelatoERP.Application.Common.Interfaces;
+    using GelatoERP.Application.Tenants.Commands.CreateTenant;
+    using MediatR;
+    using Microsoft.EntityFrameworkCore;
+
+    namespace GelatoERP.Application.Tenants.Queries.GetTenants;
+
+    /// <summary>
+    /// Consulta CQRS para obtener el listado completo de Tenants.
+    /// </summary>
+    public record GetTenantsQuery : IRequest<List<TenantDto>>;
+
+    public class GetTenantsQueryHandler : IRequestHandler<GetTenantsQuery, List<TenantDto>>
+    {
+        private readonly IApplicationDbContext _context;
+
+        public GetTenantsQueryHandler(IApplicationDbContext context)
+        {
+            _context = context;
+        }
+
+        public async Task<List<TenantDto>> Handle(GetTenantsQuery request, CancellationToken cancellationToken)
+        {
+            return await _context.Tenants
+                .AsNoTracking()
+                .Select(t => new TenantDto(
+                    t.Id,
+                    t.Name,
+                    t.TaxId,
+                    t.DomainOrSlug,
+                    t.Status,
+                    t.CreatedAtUtc))
+                .ToListAsync(cancellationToken);
+        }
+    }
+    ──────
+
+#### 3️⃣ Crear el archivo GetTenantByIdQuery.cs
+
+Ruta: src/GelatoERP.Application/Tenants/Queries/GetTenantById/GetTenantByIdQuery.cs
+
+Pega el siguiente código:
+
+    using GelatoERP.Application.Common.Interfaces;
+    using GelatoERP.Application.Tenants.Commands.CreateTenant;
+    using MediatR;
+    using Microsoft.EntityFrameworkCore;
+
+    namespace GelatoERP.Application.Tenants.Queries.GetTenantById;
+
+    /// <summary>
+    /// Consulta CQRS para obtener un Tenant específico por su ID.
+    /// </summary>
+    public record GetTenantByIdQuery(Guid Id) : IRequest<TenantDto?>;
+
+    public class GetTenantByIdQueryHandler : IRequestHandler<GetTenantByIdQuery, TenantDto?>
+    {
+        private readonly IApplicationDbContext _context;
+
+        public GetTenantByIdQueryHandler(IApplicationDbContext context)
+        {
+            _context = context;
+        }
+
+        public async Task<TenantDto?> Handle(GetTenantByIdQuery request, CancellationToken cancellationToken)
+        {
+            var tenant = await _context.Tenants
+                .AsNoTracking()
+                .FirstOrDefaultAsync(t => t.Id == request.Id, cancellationToken);
+
+            if (tenant == null)
+                return null;
+
+            return new TenantDto(
+                tenant.Id,
+                tenant.Name,
+                tenant.TaxId,
+                tenant.DomainOrSlug,
+                tenant.Status,
+                tenant.CreatedAtUtc);
+        }
+    }
+    ──────
+
+#### 4️⃣ Actualizar TenantsController.cs con los endpoints GET
+
+Abre TenantsController.cs y actualízalo para agregar GET /api/tenants y GET /api/tenants/{id}:
+
+    using GelatoERP.Application.Tenants.Commands.CreateTenant;
+    using GelatoERP.Application.Tenants.Queries.GetTenantById;
+    using GelatoERP.Application.Tenants.Queries.GetTenants;
+    using Microsoft.AspNetCore.Mvc;
+
+    namespace GelatoERP.Api.Controllers;
+
+    public class TenantsController : ApiControllerBase
+    {
+        /// <summary>
+        /// Registrar un nuevo Tenant (Heladería / Empresa) en la plataforma ERP.
+        /// </summary>
+        [HttpPost]
+        [ProducesResponseType(typeof(TenantDto), StatusCodes.Status201Created)]
+        [ProducesResponseType(StatusCodes.Status400BadRequest)]
+        public async Task<ActionResult<TenantDto>> Create(CreateTenantCommand command)
+        {
+            var result = await Mediator.Send(command);
+            return CreatedAtAction(nameof(GetById), new { id = result.Id }, result);
+        }
+
+        /// <summary>
+        /// Obtener el listado de todos los Tenants registrados.
+        /// </summary>
+        [HttpGet]
+        [ProducesResponseType(typeof(List<TenantDto>), StatusCodes.Status200OK)]
+        public async Task<ActionResult<List<TenantDto>>> GetAll()
+        {
+            var result = await Mediator.Send(new GetTenantsQuery());
+            return Ok(result);
+        }
+
+        /// <summary>
+        /// Obtener un Tenant específico por su ID.
+        /// </summary>
+        [HttpGet("{id:guid}")]
+        [ProducesResponseType(typeof(TenantDto), StatusCodes.Status200OK)]
+        [ProducesResponseType(StatusCodes.Status404NotFound)]
+        public async Task<ActionResult<TenantDto>> GetById(Guid id)
+        {
+            var result = await Mediator.Send(new GetTenantByIdQuery(id));
+
+            if (result == null)
+                return NotFound(new { message = $"No se encontró ningún Tenant con el ID {id}." });
+
+            return Ok(result);
+        }
+    }
+    ──────
+
+### 📌 ESTADO Y RESUMEN DE AVANCE DEL PROYECTO
+
+**Fases Completadas:**
+
+- ✅ **Fase 1 (Dominio):** Entidades `Tenant`, `Plant`, `User`, `Role`, `UserRole` y clases base `BaseEntity`, `ITenantEntity`.
+- ✅ **Fase 2 (Aplicación):** Interfaces `IApplicationDbContext`, `ICurrentTenantService`, configuración de MediatR y FluentValidation.
+- ✅ **Fase 3 (Infraestructura y Nube):** `ApplicationDbContext` con Global Query Filters (Soft Delete y Multi-Tenant), auditoría automática, `CurrentTenantService`, y conexión a **Supabase PostgreSQL** mediante `appsettings.Development.json`.
+- ✅ **Migración EF Core:** Migración `InitialCreate` ejecutada exitosamente en Supabase.
+- ✅ **Fase 4 (Módulo Tenants - Creación):**
+  - Comando y Handler MediatR: `CreateTenantCommand.cs`
+  - Validador FluentValidation: `CreateTenantCommandValidator.cs`
+  - Controladores API: `ApiControllerBase.cs` y `TenantsController.cs` (`POST /api/tenants` con respuesta `201 Created`).
+- ✅ **Fase 5 (Consultas CQRS y Pipeline Behaviors):**
+  - Interceptor `ValidationBehavior.cs` integrado en MediatR para ejecuciones defensivas automáticas.
+  - Consulta `GetTenantsQuery.cs` (`GET /api/tenants`) con `.AsNoTracking()`.
+  - Consulta `GetTenantByIdQuery.cs` (`GET /api/tenants/{id}`) con `.AsNoTracking()`.
+  - Endpoints probados y compilación verified 100%.
+
+**Próximas Fases a Desarrollar:**
+- 🟢 **Fase 6 (Manejo Global de Excepciones y Middleware Middleware / ProblemDetails):**
+  - Crear `CustomExceptionHandler` o Middleware para capturar `ValidationException`, `NotFoundException` y retornar respuestas estandarizadas RFC 7807 (ProblemDetails).
+  - Probar validaciones lanzando un request inválido desde Swagger.
 
