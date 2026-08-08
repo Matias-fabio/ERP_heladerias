@@ -1,3 +1,5 @@
+                                                                                                                           
+    using GelatoERP.Api.Middlewares;                                                                                       
     using GelatoERP.Application;                                                                                           
     using GelatoERP.Infrastructure;                                                                                        
     using Microsoft.OpenApi.Models;                                                                                        
@@ -8,8 +10,10 @@
     builder.Services.AddApplicationServices();                                                                             
     builder.Services.AddInfrastructureServices(builder.Configuration);                                                     
                                                                                                                            
-    // 2. Agregar controladores                                                                                            
+    // 2. Agregar controladores y manejador de excepciones estandarizado (.NET 8 ProblemDetails)                           
     builder.Services.AddControllers();                                                                                     
+    builder.Services.AddExceptionHandler<CustomExceptionHandler>();                                                        
+    builder.Services.AddProblemDetails();                                                                                  
                                                                                                                            
     // 3. Configurar Swagger/OpenAPI con soporte para el Header X-Tenant-Id                                                
     builder.Services.AddEndpointsApiExplorer();                                                                            
@@ -50,6 +54,8 @@
     var app = builder.Build();                                                                                             
                                                                                                                            
     // 4. Configurar el pipeline HTTP                                                                                      
+    app.UseExceptionHandler();                                                                                             
+                                                                                                                           
     if (app.Environment.IsDevelopment())                                                                                   
     {                                                                                                                      
         app.UseSwagger();                                                                                                  
@@ -57,14 +63,7 @@
     }                                                                                                                      
                                                                                                                            
     app.UseHttpsRedirection();                                                                                             
-                                                                                                                           
     app.UseAuthorization();                                                                                                
-                                                                                                                           
     app.MapControllers();                                                                                                  
                                                                                                                            
     app.Run();
-
-record WeatherForecast(DateOnly Date, int TemperatureC, string? Summary)
-{
-    public int TemperatureF => 32 + (int)(TemperatureC / 0.5556);
-}

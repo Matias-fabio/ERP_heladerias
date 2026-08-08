@@ -1632,7 +1632,549 @@ Abre TenantsController.cs y actualízalo para agregar GET /api/tenants y GET /ap
   - Endpoints probados y compilación verified 100%.
 
 **Próximas Fases a Desarrollar:**
+
 - 🟢 **Fase 6 (Manejo Global de Excepciones y Middleware Middleware / ProblemDetails):**
   - Crear `CustomExceptionHandler` o Middleware para capturar `ValidationException`, `NotFoundException` y retornar respuestas estandarizadas RFC 7807 (ProblemDetails).
   - Probar validaciones lanzando un request inválido desde Swagger.
+
+  ──────
+
+  ### (FASE 6)
+
+  Para la FASE 6, los siguientes pasos recomendados son:
+  1. Paso 6.1: Middleware Global de Excepciones (CustomExceptionHandler)  
+     Capturar las excepciones de validación (ValidationException) y cualquier error no controlado para devolver respuestas  
+     HTTP estructuradas estandarizadas (ProblemDetails - RFC 7807) en lugar de errores 500 feos o trazas de código.
+  2. Paso 6.2: Módulo de Gestión de Plantas / Fábricas (PlantsController y CQRS)  
+     Implementar la creación y lectura de Plantas/Fábricas de Helado vinculadas a un Tenant.  
+     ──────
+
+### 🚀 PASO 6.1: Middleware Global de Manejo de Excepciones (CustomExceptionHandler)
+
+En .NET 8, Microsoft introdujo la interfaz nativa IExceptionHandler.
+
+Con este manejador global:
+
+1. Si un request falla por validación (FluentValidation), devuelve un HTTP 400 Bad Request con la lista de campos  
+   erróneos en formato estándar ProblemDetails (RFC 7807).
+2. Si un recurso no se encuentra, devuelve HTTP 404 Not Found.
+3. Si ocurre cualquier error inesperado, devuelve HTTP 500 Internal Server Error sin exponer detalles sensibles de la  
+   base de datos al cliente.  
+   ──────
+
+### 📋 Instrucciones paso a paso:
+
+#### 1️⃣ Crear la carpeta Middlewares
+
+En la raíz de src/GelatoERP.Api, crea la carpeta:  
+ 📁 Middlewares
+
+Ruta completa: src/GelatoERP.Api/Middlewares/  
+ ──────
+
+#### 2️⃣ Crear el archivo CustomExceptionHandler.cs
+
+Dentro de src/GelatoERP.Api/Middlewares/, crea el archivo:  
+ 📄 CustomExceptionHandler.cs
+
+Pega el siguiente código:
+
+    using FluentValidation;
+    using Microsoft.AspNetCore.Diagnostics;
+    using Microsoft.AspNetCore.Mvc;
+
+    namespace GelatoERP.Api.Middlewares;
+
+    /// <summary>
+    /// Manejador global de excepciones en .NET 8 (IExceptionHandler).
+    /// Transforma errores en respuestas HTTP estandarizadas RFC 7807 (ProblemDetails).
+    /// </summary>
+    public class CustomExceptionHandler : IExceptionHandler
+    {
+        private readonly ILogger<CustomExceptionHandler> _logger;
+
+        public CustomExceptionHandler(ILogger<CustomExceptionHandler> logger)
+        {
+            _logger = logger;
+        }
+
+        public async ValueTask<bool> TryHandleAsync(
+            HttpContext httpContext,
+            Exception exception,
+            CancellationToken cancellationToken)
+        {
+            _logger.LogError(exception, "Ocurrió una excepción no controlada: {Message}", exception.Message);
+
+            var (statusCode, title, detail, errors) = exception switch
+            {
+                ValidationException validationException => (
+                    StatusCodes.Status400BadRequest,
+                    "Error de Validación",
+                    "Uno o más errores de validación ocurrieron.",
+                    validationException.Errors
+                        .GroupBy(e => e.PropertyName)
+                        .ToDictionary(
+                            g => g.Key,
+                            g => g.Select(e => e.ErrorMessage).ToArray()
+                        ) as IDictionary<string, object?>
+                ),
+                KeyNotFoundException notFoundException => (
+                    StatusCodes.Status404NotFound,
+                    "Recurso no encontrado",
+                    notFoundException.Message,
+                    null
+                ),
+                _ => (
+                    StatusCodes.Status500InternalServerError,
+                    "Error interno del servidor",
+                    "Ha ocurrido un error inesperado en el servidor.",
+                    null
+                )
+            };
+
+            httpContext.Response.StatusCode = statusCode;
+
+            var problemDetails = new ProblemDetails
+            {
+                Status = statusCode,
+                Title = title,
+                Detail = detail,
+                Instance = httpContext.Request.Path
+            };
+
+            if (errors != null)
+            {
+                problemDetails.Extensions["errors"] = errors;
+            }
+
+            await httpContext.Response.WriteAsJsonAsync(problemDetails, cancellationToken);
+
+            return true;
+        }
+    }
+    ──────
+
+#### 3️⃣ Registrar el ExceptionHandler en Program.cs
+
+Abre Program.cs en src/GelatoERP.Api/ y reemplaza su contenido por este:
+
+    using GelatoERP.Api.Middlewares;
+    using GelatoERP.Application;
+    using GelatoERP.Infrastructure;
+    using Microsoft.OpenApi.Models;
+
+    var builder = WebApplication.CreateBuilder(args);
+
+    // 1. Agregar servicios de las capas de Aplicación e Infraestructura
+    builder.Services.AddApplicationServices();
+    builder.Services.AddInfrastructureServices(builder.Configuration);
+
+    // 2. Agregar controladores y manejador de excepciones estandarizado (.NET 8 ProblemDetails)
+    builder.Services.AddControllers();
+    builder.Services.AddExceptionHandler<CustomExceptionHandler>();
+    builder.Services.AddProblemDetails();
+
+    // 3. Configurar Swagger/OpenAPI con soporte para el Header X-Tenant-Id
+    builder.Services.AddEndpointsApiExplorer();
+    builder.Services.AddSwaggerGen(options =>
+    {
+        options.SwaggerDoc("v1", new OpenApiInfo
+        {
+            Title = "GelatoERP API",
+            Version = "v1",
+            Description = "API del ERP Multi-Tenant para Heladerías y Fábricas de Helado"
+        });
+
+        // Agregar Header X-Tenant-Id a la interfaz visual de Swagger
+        options.AddSecurityDefinition("TenantId", new OpenApiSecurityScheme
+        {
+            Name = "X-Tenant-Id",
+            Type = SecuritySchemeType.ApiKey,
+            In = ParameterLocation.Header,
+            Description = "ID del Tenant (Guid) para la heladería/sucursal actual"
+        });
+
+        options.AddSecurityRequirement(new OpenApiSecurityRequirement
+        {
+            {
+                new OpenApiSecurityScheme
+                {
+                    Reference = new OpenApiReference
+                    {
+                        Type = ReferenceType.SecurityScheme,
+                        Id = "TenantId"
+                    }
+                },
+                Array.Empty<string>()
+            }
+        });
+    });
+
+    var app = builder.Build();
+
+    // 4. Configurar el pipeline HTTP
+    app.UseExceptionHandler();
+
+    if (app.Environment.IsDevelopment())
+    {
+        app.UseSwagger();
+        app.UseSwaggerUI(c => c.SwaggerEndpoint("/swagger/v1/swagger.json", "GelatoERP API v1"));
+    }
+
+    app.UseHttpsRedirection();
+    app.UseAuthorization();
+    app.MapControllers();
+
+    app.Run();
+    ──────
+
+    ### 🚀 PASO 6.2: Módulo de Gestión de Plantas/Fábricas (CreatePlantCommand)
+
+Cada Tenant (Heladería) puede tener una o más Plantas de Producción o Sucursales donde se fabrican o distribuyen los  
+ helados.
+
+En este paso creamos el caso de uso para registrar una nueva Planta (Plant) asociada a un Tenant.  
+ ──────
+
+### 📋 Instrucciones paso a paso:
+
+#### 1️⃣ Crear las carpetas en Application
+
+Dentro de src/GelatoERP.Application, crea la siguiente estructura:
+
+    Plants/
+      └── Commands/
+          └── CreatePlant/
+
+Ruta completa: src/GelatoERP.Application/Plants/Commands/CreatePlant/  
+ ──────
+
+#### 2️⃣ Crear el comando CreatePlantCommand.cs
+
+En src/GelatoERP.Application/Plants/Commands/CreatePlant/, crea el archivo:  
+ 📄 CreatePlantCommand.cs
+
+Pega el siguiente código:
+
+    using GelatoERP.Application.Common.Interfaces;
+    using GelatoERP.Domain.Entities;
+    using MediatR;
+
+    namespace GelatoERP.Application.Plants.Commands.CreatePlant;
+
+    /// <summary>
+    /// DTO de respuesta para Plantas / Sucursales.
+    /// </summary>
+    public record PlantDto(
+        Guid Id,
+        Guid TenantId,
+        string Name,
+        string Code,
+        string Address,
+        bool IsProductionPlant,
+        bool IsActive,
+        DateTime CreatedAtUtc);
+
+    /// <summary>
+    /// Comando CQRS para crear una nueva Planta o Sucursal.
+    /// </summary>
+    public record CreatePlantCommand(
+        Guid TenantId,
+        string Name,
+        string Code,
+        string Address,
+        bool IsProductionPlant) : IRequest<PlantDto>;
+
+    /// <summary>
+    /// Manejador para procesar la creación de una Planta.
+    /// </summary>
+    public class CreatePlantCommandHandler : IRequestHandler<CreatePlantCommand, PlantDto>
+    {
+        private readonly IApplicationDbContext _context;
+
+        public CreatePlantCommandHandler(IApplicationDbContext context)
+        {
+            _context = context;
+        }
+
+        public async Task<PlantDto> Handle(CreatePlantCommand request, CancellationToken cancellationToken)
+        {
+            var plant = new Plant(
+                request.TenantId,
+                request.Name,
+                request.Code,
+                request.Address,
+                request.IsProductionPlant);
+
+            _context.Plants.Add(plant);
+            await _context.SaveChangesAsync(cancellationToken);
+
+            return new PlantDto(
+                plant.Id,
+                plant.TenantId,
+                plant.Name,
+                plant.Code,
+                plant.Address,
+                plant.IsProductionPlant,
+                plant.IsActive,
+                plant.CreatedAtUtc);
+        }
+    }
+    ──────
+
+#### 3️⃣ Crear el validador CreatePlantCommandValidator.cs
+
+En src/GelatoERP.Application/Plants/Commands/CreatePlant/, crea el archivo:  
+ 📄 CreatePlantCommandValidator.cs
+
+Pega el siguiente código:
+
+    using FluentValidation;
+
+    namespace GelatoERP.Application.Plants.Commands.CreatePlant;
+
+    public class CreatePlantCommandValidator : AbstractValidator<CreatePlantCommand>
+    {
+        public CreatePlantCommandValidator()
+        {
+            RuleFor(v => v.TenantId)
+                .NotEmpty().WithMessage("El ID del Tenant es obligatorio.");
+
+            RuleFor(v => v.Name)
+                .NotEmpty().WithMessage("El nombre de la planta/sucursal es obligatorio.")
+                .MaximumLength(100).WithMessage("El nombre no debe superar los 100 caracteres.");
+
+            RuleFor(v => v.Code)
+                .NotEmpty().WithMessage("El código de la planta es obligatorio.")
+                .MaximumLength(10).WithMessage("El código no debe superar los 10 caracteres.");
+
+            RuleFor(v => v.Address)
+                .NotEmpty().WithMessage("La dirección de la planta es obligatoria.")
+                .MaximumLength(200).WithMessage("La dirección no debe superar los 200 caracteres.");
+        }
+    }
+    ──────
+
+#### 4 Crear el controlador PlantsController.cs
+
+En src/GelatoERP.Api/Controllers/, crea el archivo:  
+ 📄 PlantsController.cs
+
+Pega el siguiente código:
+
+    using GelatoERP.Application.Plants.Commands.CreatePlant;
+    using Microsoft.AspNetCore.Mvc;
+
+    namespace GelatoERP.Api.Controllers;
+
+    public class PlantsController : ApiControllerBase
+    {
+        /// <summary>
+        /// Registrar una nueva Planta de Producción o Sucursal.
+        /// </summary>
+        [HttpPost]
+        [ProducesResponseType(typeof(PlantDto), StatusCodes.Status201Created)]
+        [ProducesResponseType(StatusCodes.Status400BadRequest)]
+        public async Task<ActionResult<PlantDto>> Create(CreatePlantCommand command)
+        {
+            var result = await Mediator.Send(command);
+            return CreatedAtAction(nameof(Create), new { id = result.Id }, result);
+        }
+    }
+    ──────
+
+### 🚀 PASO 6.3: Consultas (Queries) de Plantas/Sucursales (GET /api/plants)
+
+Ahora implementamos las consultas de lectura para obtener las plantas o sucursales de producción.  
+ ──────
+
+### 📋 Instrucciones paso a paso:
+
+#### 1️⃣ Crear la estructura de carpetas
+
+Dentro de src/GelatoERP.Application/Plants/, crea la carpeta Queries y sus subcarpetas:
+
+    Plants/
+      └── Queries/
+          ├── GetPlants/
+          └── GetPlantById/
+    ──────
+
+#### 2️⃣ Crear GetPlantsQuery.cs
+
+Ruta: src/GelatoERP.Application/Plants/Queries/GetPlants/GetPlantsQuery.cs
+
+Pega el siguiente código:
+
+    using GelatoERP.Application.Common.Interfaces;
+    using GelatoERP.Application.Plants.Commands.CreatePlant;
+    using MediatR;
+    using Microsoft.EntityFrameworkCore;
+
+    namespace GelatoERP.Application.Plants.Queries.GetPlants;
+
+    /// <summary>
+    /// Consulta CQRS para obtener el listado de Plantas / Sucursales.
+    /// Permite filtrar por TenantId de forma opcional.
+    /// </summary>
+    public record GetPlantsQuery(Guid? TenantId = null) : IRequest<List<PlantDto>>;
+
+    public class GetPlantsQueryHandler : IRequestHandler<GetPlantsQuery, List<PlantDto>>
+    {
+        private readonly IApplicationDbContext _context;
+
+        public GetPlantsQueryHandler(IApplicationDbContext context)
+        {
+            _context = context;
+        }
+
+        public async Task<List<PlantDto>> Handle(GetPlantsQuery request, CancellationToken cancellationToken)
+        {
+            var query = _context.Plants.AsNoTracking();
+
+            if (request.TenantId.HasValue)
+            {
+                query = query.Where(p => p.TenantId == request.TenantId.Value);
+            }
+
+            return await query
+                .Select(p => new PlantDto(
+                    p.Id,
+                    p.TenantId,
+                    p.Name,
+                    p.Code,
+                    p.Address,
+                    p.IsProductionPlant,
+                    p.IsActive,
+                    p.CreatedAtUtc))
+                .ToListAsync(cancellationToken);
+        }
+    }
+    ──────
+
+#### 3️⃣ Crear GetPlantByIdQuery.cs
+
+Ruta: src/GelatoERP.Application/Plants/Queries/GetPlantById/GetPlantByIdQuery.cs
+
+Pega el siguiente código:
+
+    using GelatoERP.Application.Common.Interfaces;
+    using GelatoERP.Application.Plants.Commands.CreatePlant;
+    using MediatR;
+    using Microsoft.EntityFrameworkCore;
+
+    namespace GelatoERP.Application.Plants.Queries.GetPlantById;
+
+    /// <summary>
+    /// Consulta CQRS para obtener una Planta por su ID.
+    /// </summary>
+    public record GetPlantByIdQuery(Guid Id) : IRequest<PlantDto?>;
+
+    public class GetPlantByIdQueryHandler : IRequestHandler<GetPlantByIdQuery, PlantDto?>
+    {
+        private readonly IApplicationDbContext _context;
+
+        public GetPlantByIdQueryHandler(IApplicationDbContext context)
+        {
+            _context = context;
+        }
+
+        public async Task<PlantDto?> Handle(GetPlantByIdQuery request, CancellationToken cancellationToken)
+        {
+            var plant = await _context.Plants
+                .AsNoTracking()
+                .FirstOrDefaultAsync(p => p.Id == request.Id, cancellationToken);
+
+            if (plant == null)
+                return null;
+
+            return new PlantDto(
+                plant.Id,
+                plant.TenantId,
+                plant.Name,
+                plant.Code,
+                plant.Address,
+                plant.IsProductionPlant,
+                plant.IsActive,
+                plant.CreatedAtUtc);
+        }
+    }
+    ──────
+
+#### 4️⃣ Actualizar PlantsController.cs
+
+Abre PlantsController.cs y actualízalo para agregar los endpoints GET:
+
+    using GelatoERP.Application.Plants.Commands.CreatePlant;
+    using GelatoERP.Application.Plants.Queries.GetPlantById;
+    using GelatoERP.Application.Plants.Queries.GetPlants;
+    using Microsoft.AspNetCore.Mvc;
+
+    namespace GelatoERP.Api.Controllers;
+
+    public class PlantsController : ApiControllerBase
+    {
+        /// <summary>
+        /// Registrar una nueva Planta de Producción o Sucursal.
+        /// </summary>
+        [HttpPost]
+        [ProducesResponseType(typeof(PlantDto), StatusCodes.Status201Created)]
+        [ProducesResponseType(StatusCodes.Status400BadRequest)]
+        public async Task<ActionResult<PlantDto>> Create(CreatePlantCommand command)
+        {
+            var result = await Mediator.Send(command);
+            return CreatedAtAction(nameof(GetById), new { id = result.Id }, result);
+        }
+
+        /// <summary>
+        /// Obtener el listado de Plantas / Sucursales (filtrado opcional por tenantId).
+        /// </summary>
+        [HttpGet]
+        [ProducesResponseType(typeof(List<PlantDto>), StatusCodes.Status200OK)]
+        public async Task<ActionResult<List<PlantDto>>> GetAll([FromQuery] Guid? tenantId)
+        {
+            var result = await Mediator.Send(new GetPlantsQuery(tenantId));
+            return Ok(result);
+        }
+
+        /// <summary>
+        /// Obtener una Planta por su ID único.
+        /// </summary>
+        [HttpGet("{id:guid}")]
+        [ProducesResponseType(typeof(PlantDto), StatusCodes.Status200OK)]
+        [ProducesResponseType(StatusCodes.Status404NotFound)]
+        public async Task<ActionResult<PlantDto>> GetById(Guid id)
+        {
+            var result = await Mediator.Send(new GetPlantByIdQuery(id));
+
+            if (result == null)
+                return NotFound(new { message = $"No se encontró ninguna Planta con el ID {id}." });
+
+            return Ok(result);
+        }
+    }
+    ──────
+
+### 📌 ESTADO Y RESUMEN DE AVANCE DEL PROYECTO
+
+**Fases Completadas:**
+
+- ✅ **Fase 1 (Dominio):** Entidades `Tenant`, `Plant`, `User`, `Role`, `UserRole` y clases base `BaseEntity`, `ITenantEntity`.
+- ✅ **Fase 2 (Aplicación):** Interfaces `IApplicationDbContext`, `ICurrentTenantService`, configuración de MediatR y FluentValidation.
+- ✅ **Fase 3 (Infraestructura y Nube):** `ApplicationDbContext` con Global Query Filters, auditoría automática, `CurrentTenantService`, y conexión a **Supabase PostgreSQL**.
+- ✅ **Migración EF Core:** Migración `InitialCreate` ejecutada exitosamente en Supabase.
+- ✅ **Fase 4 (Módulo Tenants - Creación):** `CreateTenantCommand.cs`, `CreateTenantCommandValidator.cs`, `ApiControllerBase.cs`, `TenantsController.cs` (`POST /api/tenants` probado y respondiendo `201 Created`).
+- ✅ **Fase 5 (Consultas CQRS y Pipeline Behaviors):** `ValidationBehavior.cs` integrado en MediatR, `GetTenantsQuery.cs` y `GetTenantByIdQuery.cs` (`GET /api/tenants`).
+- ✅ **Fase 6 (Manejo de Excepciones y Módulo de Plantas / Sucursales):**
+  - Manejador global `CustomExceptionHandler.cs` (.NET 8 `IExceptionHandler` / `ProblemDetails`) en `src/GelatoERP.Api/Middlewares/`.
+  - Comando `CreatePlantCommand.cs` y Validador `CreatePlantCommandValidator.cs`.
+  - Consultas `GetPlantsQuery.cs` y `GetPlantByIdQuery.cs` con `.AsNoTracking()`.
+  - Controlador `PlantsController.cs` (`POST /api/plants`, `GET /api/plants`, `GET /api/plants/{id}`).
+  - Compilación verified 100% limpia sin errores.
+
+**Próxima Fase a Desarrollar:**
+- 🟢 **Fase 7 (Módulo de Usuarios, Autenticación y JWT):**
+  - Implementar servicio de hashing de contraseñas (BCrypt o ASP.NET Core PasswordHasher).
+  - Caso de uso para registrar usuarios (`RegisterUserCommand`) asignados a un Tenant y Rol.
+  - Servicio de Token JWT e Iniciar Sesión (`LoginQuery` / `LoginCommand`).
 
